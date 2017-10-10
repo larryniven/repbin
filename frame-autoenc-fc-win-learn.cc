@@ -10,6 +10,24 @@
 #include <random>
 #include <algorithm>
 
+void block_noise(la::cpu::tensor<double>& input, int win_size, int input_dim,
+    int time, int freq, std::default_random_engine& gen)
+{
+    for (int b = 0; b < input.size(0); ++b) {
+        std::uniform_int_distribution<> time_dist {0, win_size - time};
+        std::uniform_int_distribution<> freq_dist {0, input_dim - freq};
+
+        int t = time_dist(gen);
+        int f = freq_dist(gen);
+
+        for (int i = t; i < time; ++i) {
+            for (int j = f; j < freq; ++j) {
+                input({b, i * input_dim + j}) = 0;
+            }
+        }
+    }
+}
+
 struct learning_env {
 
     speech::scp frame_scp;
@@ -21,6 +39,9 @@ struct learning_env {
 
     double input_dropout;
     double hidden_dropout;
+
+    int block_noise_time;
+    int block_noise_freq;
 
     std::string output_param;
     std::string output_opt_data;
@@ -57,10 +78,14 @@ int main(int argc, char *argv[])
             {"output-param", "", false},
             {"output-opt-data", "", false},
             {"win-size", "", true},
+            {"wta-k", "", false},
+            {"input-dropout", "", false},
+            {"hidden-dropout", "", false},
+            {"block-noise-time", "", false},
+            {"block-noise-freq", "", false},
             {"batch-size", "", false},
             {"seed", "", false},
             {"shuffle", "", false},
-            {"wta-k", "", false},
             {"opt", "const-step,adagrad,rmsprop,adam", true},
             {"step-size", "", true},
             {"momentum", "", false},
@@ -102,6 +127,16 @@ learning_env::learning_env(std::unordered_map<std::string, std::string> args)
 
     if (ebt::in(std::string("wta-k"), args)) {
         wta_k = std::stoi(args.at("wta-k"));
+    }
+
+    block_noise_time = -1;
+    if (ebt::in(std::string("block-noise-time"), args)) {
+        block_noise_time = std::stoi(args.at("block-noise-time"));
+    }
+
+    block_noise_freq = -1;
+    if (ebt::in(std::string("block-noise-freq"), args)) {
+        block_noise_freq = std::stoi(args.at("block-noise-freq"));
     }
 
     step_size = std::stod(args.at("step-size"));
@@ -232,6 +267,10 @@ void learning_env::run()
 
         la::cpu::tensor<double> input_tensor { la::cpu::vector<double>(input_tensor_vec),
             std::vector<unsigned int> { loaded_samples, win_size * input_dim }};
+
+        if (block_noise_time != -1 && block_noise_freq != -1) {
+            block_noise(input_tensor, win_size, input_dim, block_noise_time, block_noise_freq, gen);
+        }
 
         std::shared_ptr<autodiff::op_t> input = graph.var(input_tensor);
 
