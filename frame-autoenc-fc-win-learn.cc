@@ -56,6 +56,7 @@ struct learning_env {
     std::default_random_engine gen;
 
     int save_every;
+    std::string save_every_prefix;
 
     std::vector<std::pair<int, int>> indices;
 
@@ -92,6 +93,7 @@ int main(int argc, char *argv[])
             {"clip", "", false},
             {"decay", "", false},
             {"save-every", "", false},
+            {"save-every-prefix", "", false},
         }
     };
 
@@ -357,7 +359,7 @@ void learning_env::run()
         std::cout << std::endl;
 
         if (save_every > 0 && nsample % save_every == 0) {
-            std::ofstream param_ofs { "param-debug" };
+            std::ofstream param_ofs { args.at("save-every-prefix") + "-" + std::to_string(nsample) };
             tensor_tree::save_tensor(param, param_ofs);
             param_ofs.close();
         }
