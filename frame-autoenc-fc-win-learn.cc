@@ -34,7 +34,6 @@ struct learning_env {
 
     std::shared_ptr<tensor_tree::vertex> param;
 
-    int wta_k;
     unsigned int win_size;
 
     double input_dropout;
@@ -55,6 +54,8 @@ struct learning_env {
 
     int seed;
     std::default_random_engine gen;
+
+    int save_every;
 
     std::vector<std::pair<int, int>> indices;
 
@@ -78,7 +79,6 @@ int main(int argc, char *argv[])
             {"output-param", "", false},
             {"output-opt-data", "", false},
             {"win-size", "", true},
-            {"wta-k", "", false},
             {"input-dropout", "", false},
             {"hidden-dropout", "", false},
             {"block-noise-time", "", false},
@@ -91,6 +91,7 @@ int main(int argc, char *argv[])
             {"momentum", "", false},
             {"clip", "", false},
             {"decay", "", false},
+            {"save-every", "", false},
         }
     };
 
@@ -119,15 +120,11 @@ learning_env::learning_env(std::unordered_map<std::string, std::string> args)
     frame_scp.open(args.at("frame-scp"));
 
     std::ifstream param_ifs { args.at("param") };
-    param = autoenc::make_tensor_tree(1);
+    param = autoenc::make_symmetric_ae_tensor_tree();
     tensor_tree::load_tensor(param, param_ifs);
     param_ifs.close();
 
     win_size = std::stoi(args.at("win-size"));
-
-    if (ebt::in(std::string("wta-k"), args)) {
-        wta_k = std::stoi(args.at("wta-k"));
-    }
 
     block_noise_time = -1;
     if (ebt::in(std::string("block-noise-time"), args)) {
@@ -178,6 +175,11 @@ learning_env::learning_env(std::unordered_map<std::string, std::string> args)
     seed = 1;
     if (ebt::in(std::string("seed"), args)) {
         seed = std::stoi(args.at("seed"));
+    }
+
+    save_every = -1;
+    if (ebt::in(std::string("save-every"), args)) {
+        save_every = std::stoi(args.at("save-every"));
     }
 
     if (args.at("opt") == "rmsprop") {
@@ -274,13 +276,7 @@ void learning_env::run()
 
         std::shared_ptr<autodiff::op_t> input = graph.var(input_tensor);
 
-        std::shared_ptr<autodiff::op_t> pred;
-
-        if (ebt::in(std::string("wta-k"), args)) {
-            pred = autoenc::make_wta_nn(input, var_tree, wta_k);
-        } else {
-            pred = autoenc::make_nn(input, var_tree, input_dropout, hidden_dropout, gen);
-        }
+        std::shared_ptr<autodiff::op_t> pred = autoenc::make_symmetric_ae(input, var_tree, input_dropout, hidden_dropout, gen);
 
         auto& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
 
@@ -303,7 +299,7 @@ void learning_env::run()
         auto topo_order = autodiff::natural_topo_order(graph);
         autodiff::guarded_grad(topo_order, autodiff::grad_funcs);
 
-        std::shared_ptr<tensor_tree::vertex> grad = autoenc::make_tensor_tree(1);
+        std::shared_ptr<tensor_tree::vertex> grad = autoenc::make_symmetric_ae_tensor_tree();
         tensor_tree::copy_grad(grad, var_tree);
 
 #if 0
@@ -359,6 +355,13 @@ void learning_env::run()
             << " update: " << v2 - v1 << " rate: " << (v2 - v1) / v1 << std::endl;
 
         std::cout << std::endl;
+
+        if (save_every > 0 && nsample % save_every == 0) {
+            std::ofstream param_ofs { "param-debug" };
+            tensor_tree::save_tensor(param, param_ofs);
+            param_ofs.close();
+        }
+
     }
 
     std::ofstream param_ofs { output_param };
