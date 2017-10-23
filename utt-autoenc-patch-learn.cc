@@ -339,6 +339,10 @@ void learning_env::run()
 
     }
 
+    if (ebt::in(std::string("loss-mode"), args)) {
+        return;
+    }
+
     std::ofstream param_ofs { output_param };
     tensor_tree::save_tensor(param, param_ofs);
     param_ofs.close();
