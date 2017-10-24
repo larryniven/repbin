@@ -222,12 +222,14 @@ void learning_env::run()
             input_var = autodiff::emul(input_var, mask);
         }
 
-        auto input = autodiff::corr_linearize(input_var, get_var(var_tree->children[0]));
+        auto input = autodiff::corr_linearize(input_var, get_var(var_tree->children[0]),
+            patch_time / 2, patch_freq / 2, 1, 1);
 
         std::shared_ptr<autodiff::op_t> recon = autoenc::make_symmetric_ae(
             input, var_tree, 0.0, hidden_dropout, &gen);
 
-        auto pred = autodiff::corr_delinearize(recon, get_var(var_tree->children[0]));
+        auto pred = autodiff::corr_delinearize(recon, get_var(var_tree->children[0]),
+            patch_time / 2, patch_freq / 2, 1, 1);
 
         la::cpu::tensor_like<double>& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
 

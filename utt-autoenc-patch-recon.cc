@@ -107,20 +107,24 @@ void prediction_env::run()
             { 1, (unsigned int) frames.size(), (unsigned int) input_dim, 1 }};
 
         la::cpu::tensor<double> input_corr_lin;
-        input_corr_lin.resize({(unsigned int) frames.size(), (unsigned int) input_dim, (unsigned int) patch_time * patch_freq});
+        input_corr_lin.resize({(unsigned int) frames.size(), (unsigned int) input_dim,
+            (unsigned int) patch_time * patch_freq});
 
-        la::cpu::corr_linearize(input_corr_lin, input_tensor, patch_time, patch_freq);
+        la::cpu::corr_linearize(input_corr_lin, input_tensor, patch_time, patch_freq,
+            patch_time / 2, patch_freq / 2, 1, 1);
 
         auto input = graph.var(input_corr_lin);
 
-        std::shared_ptr<autodiff::op_t> pred = autoenc::make_symmetric_ae(input, var_tree, 0.0, 0.0, nullptr);
+        std::shared_ptr<autodiff::op_t> pred = autoenc::make_symmetric_ae(
+            input, var_tree, 0.0, 0.0, nullptr);
 
         auto& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
 
         la::cpu::tensor<double> input_recon;
         input_recon.resize({ 1, (unsigned int) frames.size(), (unsigned int) input_dim, 1 });
 
-        la::cpu::corr_delinearize(input_recon, pred_t, patch_time, patch_freq, 0, 0, 1, 1);
+        la::cpu::corr_delinearize(input_recon, pred_t, patch_time, patch_freq,
+            patch_time / 2, patch_freq / 2, 1, 1);
 
         std::cout << frame_scp.entries[nsample].key << std::endl;
         for (int i = 0; i < frames.size(); ++i) {
