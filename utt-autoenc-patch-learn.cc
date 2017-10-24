@@ -19,9 +19,6 @@ struct learning_env {
     double input_dropout;
     double hidden_dropout;
 
-    int batch_size;
-    int rand_patches_per_utt;
-
     int patch_time;
     int patch_freq;
 
@@ -128,11 +125,6 @@ learning_env::learning_env(std::unordered_map<std::string, std::string> args)
         clip = std::stod(args.at("clip"));
     }
 
-    batch_size = 1;
-    if (ebt::in(std::string("batch-size"), args)) {
-        batch_size = std::stoi(args.at("batch-size"));
-    }
-
     patch_time = 5;
     if (ebt::in(std::string("patch-time"), args)) {
         patch_time = std::stoi(args.at("patch-time"));
@@ -141,11 +133,6 @@ learning_env::learning_env(std::unordered_map<std::string, std::string> args)
     patch_freq = 5;
     if (ebt::in(std::string("patch-freq"), args)) {
         patch_freq = std::stoi(args.at("patch-freq"));
-    }
-
-    rand_patches_per_utt = 50;
-    if (ebt::in(std::string("rand-patches-per-utt"), args)) {
-        rand_patches_per_utt = std::stoi(args.at("rand-patches-per-utt"));
     }
 
     input_dropout = 0;
@@ -225,34 +212,26 @@ void learning_env::run()
             }
         }
 
-        la::cpu::tensor<double> input_tensor { la::cpu::vector<double>(input_vec),
+        la::cpu::tensor<double> input_t { la::cpu::vector<double>(input_vec),
             { 1, (unsigned int) frames.size(), (unsigned int) input_dim, 1 }};
 
-        la::cpu::tensor<double> gold_corr_lin;
-        gold_corr_lin.resize({(unsigned int) frames.size(), (unsigned int) input_dim, (unsigned int) patch_time * patch_freq});
-
-        la::cpu::corr_linearize(gold_corr_lin, input_tensor, patch_time, patch_freq);
-
-        auto input_var = graph.var(input_tensor);
+        auto input_var = graph.var(input_t);
 
         if (input_dropout != 0.0) {
             auto mask = autodiff::dropout_mask(input_var, input_dropout, gen);
             input_var = autodiff::emul(input_var, mask);
         }
 
-        auto& input_t = autodiff::get_output<la::cpu::tensor_like<double>>(input_var);
+        auto input = autodiff::corr_linearize(input_var, get_var(var_tree->children[0]));
 
-        la::cpu::tensor<double> input_corr_lin;
-        input_corr_lin.resize({(unsigned int) frames.size(), (unsigned int) input_dim, (unsigned int) patch_time * patch_freq});
-        la::cpu::corr_linearize(input_corr_lin, input_t, patch_time, patch_freq);
+        std::shared_ptr<autodiff::op_t> recon = autoenc::make_symmetric_ae(
+            input, var_tree, 0.0, hidden_dropout, &gen);
 
-        auto input = graph.var(input_corr_lin);
+        auto pred = autodiff::corr_delinearize(recon, get_var(var_tree->children[0]));
 
-        std::shared_ptr<autodiff::op_t> pred = autoenc::make_symmetric_ae(input, var_tree, 0.0, hidden_dropout, gen);
+        la::cpu::tensor_like<double>& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
 
-        auto& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
-
-        nn::l2_loss loss { gold_corr_lin, pred_t };
+        nn::l2_loss loss { input_t, pred_t };
 
         pred->grad = std::make_shared<la::cpu::tensor<double>>(loss.grad());
         
@@ -267,6 +246,7 @@ void learning_env::run()
         std::cout << "E: " << ell / frames.size() << std::endl;
 
         if (ebt::in(std::string("loss-mode"), args)) {
+            std::cout << std::endl;
             ++nsample;
             continue;
         }
@@ -276,31 +256,6 @@ void learning_env::run()
 
         std::shared_ptr<tensor_tree::vertex> grad = autoenc::make_symmetric_ae_tensor_tree();
         tensor_tree::copy_grad(grad, var_tree);
-
-#if 0
-        {
-            std::shared_ptr<tensor_tree::vertex> param2 = tensor_tree::deep_copy(param);
-            la::cpu::tensor<double>& t = tensor_tree::get_tensor(param2->children[0]->children[0]);
-            t({0, 0, 0, 0}) += 1e-8;
-
-            autodiff::computation_graph graph2;
-            auto var_tree2 = tensor_tree::make_var_tree(graph2, param2);
-            std::shared_ptr<autodiff::op_t> input2 = graph2.var(input_tensor);
-
-            std::shared_ptr<cnn::transcriber> trans2 = cnn::make_transcriber(cnn_config, dropout, &gen);
-            std::shared_ptr<autodiff::op_t> logprob2 = (*trans)(var_tree2, input2);
-
-            auto& pred2 = autodiff::get_output<la::cpu::tensor_like<double>>(logprob2);
-            nn::log_loss loss2 { gold, pred2 };
-
-            double ell2 = loss2.loss();
-
-            std::cout << "numeric grad: " << (ell2 - ell) / 1e-8 << std::endl;
-
-            la::cpu::tensor<double>& grad_t = tensor_tree::get_tensor(grad->children[0]->children[0]);
-            std::cout << "analytic grad: " << grad_t({0, 0, 0, 0}) << std::endl;
-        }
-#endif
 
         double n = tensor_tree::norm(grad);
 
