@@ -16,6 +16,8 @@ struct prediction_env {
 
     std::shared_ptr<tensor_tree::vertex> param;
 
+    int print_channel;
+
     int patch_time;
     int patch_freq;
 
@@ -37,6 +39,7 @@ int main(int argc, char *argv[])
             {"param", "", true},
             {"patch-time", "", false},
             {"patch-freq", "", false},
+            {"print-channel", "", false}
         }
     };
 
@@ -115,25 +118,50 @@ void prediction_env::run()
 
         auto input = graph.var(input_corr_lin);
 
-        std::shared_ptr<autodiff::op_t> pred = autoenc::make_symmetric_ae(
-            input, var_tree, 0.0, 0.0, nullptr);
+        auto res = autodiff::mul(input, get_var(var_tree->children[0]));
 
-        auto& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
+        auto& res_t = autodiff::get_output<la::cpu::tensor<double>>(res);
 
-        la::cpu::tensor<double> input_recon;
-        input_recon.resize({ 1, (unsigned int) frames.size(), (unsigned int) input_dim, 1 });
+        if (ebt::in(std::string("print-channel"), args)) {
 
-        la::cpu::corr_delinearize(input_recon, pred_t, patch_time, patch_freq,
-            patch_time / 2, patch_freq / 2, 1, 1);
+            std::cerr << res_t.sizes() << std::endl;
 
-        std::cout << frame_scp.entries[nsample].key << std::endl;
-        for (int i = 0; i < frames.size(); ++i) {
-            for (int j = 0; j < input_dim; ++j) {
-                std::cout << input_recon({0, i, j, 0}) << " ";
+            print_channel = std::stoi(args.at("print-channel"));
+
+            std::cout << frame_scp.entries[nsample].key << std::endl;
+            for (int i = 0; i < res_t.size(0); ++i) {
+                for (int j = 0; j < res_t.size(1); ++j) {
+                    std::cout << res_t({i, j, print_channel}) << " ";
+                }
+
+                std::cout << std::endl;
             }
-            std::cout << std::endl;
+
+            std::cout << "." << std::endl;
+
+        } else {
+
+            std::shared_ptr<autodiff::op_t> pred = autoenc::make_symmetric_ae(
+                input, var_tree, 0.0, 0.0, nullptr);
+
+            auto& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
+
+            la::cpu::tensor<double> input_recon;
+            input_recon.resize({ 1, (unsigned int) frames.size(), (unsigned int) input_dim, 1 });
+
+            la::cpu::corr_delinearize(input_recon, pred_t, patch_time, patch_freq,
+                patch_time / 2, patch_freq / 2, 1, 1);
+
+            std::cout << frame_scp.entries[nsample].key << std::endl;
+            for (int i = 0; i < frames.size(); ++i) {
+                for (int j = 0; j < input_dim; ++j) {
+                    std::cout << input_recon({0, i, j, 0}) << " ";
+                }
+                std::cout << std::endl;
+            }
+            std::cout << "." << std::endl;
+
         }
-        std::cout << "." << std::endl;
 
         ++nsample;
 

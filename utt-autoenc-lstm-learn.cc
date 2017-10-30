@@ -4,56 +4,80 @@
 #include "speech/speech.h"
 #include "nn/nn.h"
 #include "nn/tensor-tree.h"
-#include "nn/autoenc-fc.h"
+#include "nn/lstm.h"
+#include "nn/lstm-tensor-tree.h"
 #include <fstream>
 #include <vector>
 #include <random>
 #include <algorithm>
 
-la::cpu::tensor<double> block_noise_mask(la::cpu::tensor<double> const& input,
-    int patch_time, int patch_freq, int npatch, std::default_random_engine& gen)
+std::shared_ptr<tensor_tree::vertex> make_tensor_tree(int layer)
 {
-    int batch_size = input.size(0);
+    lstm::multilayer_lstm_tensor_tree_factory lstm_factory {
+        std::make_shared<lstm::bi_lstm_tensor_tree_factory>(
+            lstm::bi_lstm_tensor_tree_factory {
+                std::make_shared<lstm::lstm_tensor_tree_factory>(
+                    lstm::lstm_tensor_tree_factory{})
+            }),
+        layer
+    };
 
-    std::uniform_int_distribution<> time_dist { 0, ((int) input.size(1)) - patch_time };
-    std::uniform_int_distribution<> freq_dist { 0, ((int) input.size(2)) - patch_freq };
+    tensor_tree::vertex root { "nil" };
 
-    la::cpu::tensor<double> mask;
-    mask.resize({(unsigned int) batch_size, input.size(1), input.size(2), input.size(3)}, 1);
+    root.children.push_back(lstm_factory());
+    root.children.push_back(lstm_factory());
+    root.children.push_back(tensor_tree::make_tensor("regression weight"));
+    root.children.push_back(tensor_tree::make_tensor("regression bias"));
 
-    for (int n = 0; n < batch_size; ++n) {
-        for (int c = 0; c < input.size(3); ++c) {
-            for (int z = 0; z < npatch; ++z) {
-                int t = time_dist(gen);
-                int f = freq_dist(gen);
+    return std::make_shared<tensor_tree::vertex>(root);
+}
 
-                for (int i = 0; i < patch_time; ++i) {
-                    for (int j = 0; j < patch_freq; ++j) {
-                        mask({n, t + i, f + j, c}) = 0;
-                    }
-                }
-            }
+std::shared_ptr<lstm::transcriber>
+make_transcriber(
+    std::shared_ptr<tensor_tree::vertex> param,
+    double dropout,
+    std::default_random_engine *gen,
+    bool pyramid)
+{
+    int layer = param->children.size();
+
+    lstm::layered_transcriber trans;
+
+    for (int i = 0; i < layer; ++i) {
+        std::shared_ptr<lstm::transcriber> f_trans;
+        std::shared_ptr<lstm::transcriber> b_trans;
+
+        f_trans = std::make_shared<lstm::lstm_transcriber>(
+            lstm::lstm_transcriber { (int) tensor_tree::get_tensor(
+                param->children[i]->children[0]->children[2]).size(0) });
+        b_trans = std::make_shared<lstm::lstm_transcriber>(
+            lstm::lstm_transcriber { (int) tensor_tree::get_tensor(
+                param->children[i]->children[1]->children[2]).size(0), true });
+
+        if (dropout != 0.0) {
+            f_trans = std::make_shared<lstm::input_dropout_transcriber>(
+                lstm::input_dropout_transcriber { f_trans, dropout, *gen });
+
+            b_trans = std::make_shared<lstm::input_dropout_transcriber>(
+                lstm::input_dropout_transcriber { b_trans, dropout, *gen });
         }
+
+        trans.layer.push_back(std::make_shared<lstm::bi_transcriber>(
+            lstm::bi_transcriber { (int) tensor_tree::get_tensor(
+                param->children[i]->children[2]).size(1), f_trans, b_trans }));
     }
 
-    return mask;
+    return std::make_shared<lstm::layered_transcriber>(trans);
 }
 
 struct learning_env {
 
     speech::scp frame_scp;
 
+    int layer;
     std::shared_ptr<tensor_tree::vertex> param;
 
     double input_dropout;
-    double hidden_dropout;
-
-    int patch_time;
-    int patch_freq;
-
-    int block_noise_time;
-    int block_noise_freq;
-    int block_noise_nblock;
 
     std::string output_param;
     std::string output_opt_data;
@@ -83,8 +107,8 @@ struct learning_env {
 int main(int argc, char *argv[])
 {
     ebt::ArgumentSpec spec {
-        "utt-autoenc-patch-learn",
-        "Train a patch autoencoder",
+        "utt-autoenc-lstm-learn",
+        "Train an lstm autoencoder",
         {
             {"frame-scp", "", true},
             {"param", "", true},
@@ -92,12 +116,6 @@ int main(int argc, char *argv[])
             {"output-param", "", false},
             {"output-opt-data", "", false},
             {"input-dropout", "", false},
-            {"hidden-dropout", "", false},
-            {"patch-time", "", false},
-            {"patch-freq", "", false},
-            {"block-noise-time", "", false},
-            {"block-noise-freq", "", false},
-            {"block-noise-nblock", "", false},
             {"seed", "", false},
             {"shuffle", "", false},
             {"opt", "const-step,adagrad,rmsprop,adam", true},
@@ -135,8 +153,11 @@ learning_env::learning_env(std::unordered_map<std::string, std::string> args)
 {
     frame_scp.open(args.at("frame-scp"));
 
+    std::string line;
     std::ifstream param_ifs { args.at("param") };
-    param = autoenc::make_symmetric_ae_tensor_tree();
+    std::getline(param_ifs, line);
+    layer = std::stoi(line);
+    param = make_tensor_tree(layer);
     tensor_tree::load_tensor(param, param_ifs);
     param_ifs.close();
 
@@ -161,36 +182,9 @@ learning_env::learning_env(std::unordered_map<std::string, std::string> args)
         clip = std::stod(args.at("clip"));
     }
 
-    patch_time = 5;
-    if (ebt::in(std::string("patch-time"), args)) {
-        patch_time = std::stoi(args.at("patch-time"));
-    }
-
-    patch_freq = 5;
-    if (ebt::in(std::string("patch-freq"), args)) {
-        patch_freq = std::stoi(args.at("patch-freq"));
-    }
-
-    if (ebt::in(std::string("block-noise-time"), args)) {
-        block_noise_time = std::stoi(args.at("block-noise-time"));
-    }
-
-    if (ebt::in(std::string("block-noise-freq"), args)) {
-        block_noise_freq = std::stoi(args.at("block-noise-freq"));
-    }
-
-    if (ebt::in(std::string("block-noise-nblock"), args)) {
-        block_noise_nblock = std::stoi(args.at("block-noise-nblock"));
-    }
-
     input_dropout = 0;
     if (ebt::in(std::string("input-dropout"), args)) {
         input_dropout = std::stod(args.at("input-dropout"));
-    }
-
-    hidden_dropout = 0;
-    if (ebt::in(std::string("hidden-dropout"), args)) {
-        hidden_dropout = std::stod(args.at("hidden-dropout"));
     }
 
     seed = 1;
@@ -261,32 +255,27 @@ void learning_env::run()
         }
 
         la::cpu::tensor<double> input_t { la::cpu::vector<double>(input_vec),
-            { 1, (unsigned int) frames.size(), (unsigned int) input_dim, 1 }};
+            { (unsigned int) frames.size(), 1, (unsigned int) input_dim }};
 
         auto input_var = graph.var(input_t);
 
-        if (ebt::in(std::string("block-noise-time"), args)) {
-            auto mask = block_noise_mask(input_t,
-                block_noise_time, block_noise_freq, block_noise_nblock, gen);
-            auto& t = autodiff::get_output<la::cpu::tensor_like<double>>(input_var);
-            la::cpu::emul(t, t, mask);
-        }
+        lstm::trans_seq_t seq = lstm::make_trans_seq(input_var);
 
-        if (input_dropout != 0.0) {
-            auto mask = autodiff::dropout_mask(input_var, input_dropout, gen);
-            input_var = autodiff::emul(input_var, mask);
-        }
+        std::shared_ptr<lstm::transcriber> enc_trans
+            = make_transcriber(param->children[0], input_dropout, &gen, false);
 
-        auto input = autodiff::corr_linearize(input_var, get_var(var_tree->children[0]),
-            patch_time / 2, patch_freq / 2, 1, 1);
+        lstm::trans_seq_t h1 = (*enc_trans)(var_tree->children[0], seq);
 
-        std::shared_ptr<autodiff::op_t> recon = autoenc::make_symmetric_ae(
-            input, var_tree, 0.0, hidden_dropout, &gen);
+        std::shared_ptr<lstm::transcriber> dec_trans
+            = make_transcriber(param->children[1], 0.0, nullptr, false);
+        
+        lstm::trans_seq_t h2 = (*dec_trans)(var_tree->children[1], h1);
 
-        auto pred = autodiff::corr_delinearize(recon, get_var(var_tree->children[0]),
-            patch_time / 2, patch_freq / 2, 1, 1);
+        auto z = autodiff::mul(h2.feat, tensor_tree::get_var(var_tree->children[2]));
+        auto b = autodiff::rep_row_to(tensor_tree::get_var(var_tree->children[3]), z);
+        auto pred = autodiff::add(z, b);
 
-        la::cpu::tensor_like<double>& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
+        auto& pred_t = autodiff::get_output<la::cpu::tensor_like<double>>(pred);
 
         nn::l2_loss loss { input_t, pred_t };
 
@@ -311,7 +300,7 @@ void learning_env::run()
         auto topo_order = autodiff::natural_topo_order(graph);
         autodiff::guarded_grad(topo_order, autodiff::grad_funcs);
 
-        std::shared_ptr<tensor_tree::vertex> grad = autoenc::make_symmetric_ae_tensor_tree();
+        std::shared_ptr<tensor_tree::vertex> grad = make_tensor_tree(layer);
         tensor_tree::copy_grad(grad, var_tree);
 
         double n = tensor_tree::norm(grad);
@@ -356,6 +345,7 @@ void learning_env::run()
     }
 
     std::ofstream param_ofs { output_param };
+    param_ofs << layer << std::endl;
     tensor_tree::save_tensor(param, param_ofs);
     param_ofs.close();
 
